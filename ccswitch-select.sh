@@ -441,120 +441,366 @@ def apply_openclaw(cfg):
     print(f"已写入: {path}")
 
 def apply_hermes(cfg):
-    """更新 ~/.hermes/config.yaml 中 custom:ccswitch-selected 自定义 Provider 配置。
+    """将 CC Switch 的 Hermes 套餐写入 Hermes 原生 custom provider 配置。"""
+    import subprocess, shutil, time, re as _re
 
-    Hermes 套餐的 settings_config 格式（来自 CC Switch 数据库）：
-      {
-        "base_url": "https://...",
-        "api_key":  "sk-...",
-        "api_mode": "anthropic_messages" | "openai_chat" | ...,  # 可选
-        "models":   [{"id": "...", "name": "..."}]              # 可选
-      }
-
-    写入目标：~/.hermes/config.yaml 中 custom_providers 块下的
-      custom:ccswitch-selected 条目，保留文件其余内容不变。
-
-    切换后仍需在 Telegram 发送 /model <模型名> --provider custom:ccswitch-selected
-    使当前会话覆盖与新套餐一致（详见运维手册）。
-    """
-    import subprocess, shutil
-
-    hermes_dir  = os.path.expanduser('~/.hermes')
+    hermes_dir = os.path.expanduser('~/.hermes')
     config_path = os.path.join(hermes_dir, 'config.yaml')
     os.makedirs(hermes_dir, exist_ok=True)
 
-    base_url = cfg.get('base_url', '').rstrip('/')
-    api_key  = cfg.get('api_key', '')
-    api_mode = cfg.get('api_mode', '')   # 'anthropic_messages' / 'openai_chat' 等
-    models   = cfg.get('models', [])
+    base_url = str(cfg.get('base_url', '') or '').rstrip('/')
+    api_key = str(cfg.get('api_key', '') or '')
+    raw_models = cfg.get('models', [])
+    models = [m for m in raw_models if isinstance(m, dict)] if isinstance(raw_models, list) else []
+    model_ids = [str(m.get('id', '') or '').strip() for m in models]
+    first_model = next((mid for mid in model_ids if mid), '')
+    api_mode = str(cfg.get('api_mode', '') or '').strip()
 
     if not base_url:
         print("  ⚠ 套餐缺少 base_url，无法更新 Hermes 配置")
         return False
+    if not api_key:
+        print("  ⚠ 套餐缺少 api_key，无法更新 Hermes 配置")
+        return False
 
-    # 决定 Hermes 的 provider_type
-    # anthropic_messages → anthropic；其余默认 openai
-    if api_mode == 'anthropic_messages':
-        provider_type = 'anthropic'
-    else:
-        provider_type = 'openai'
+    # CC Switch 的旧记录可能没有 api_mode。Hermes 原生支持三种传输，
+    # 根据模型族补全，避免误走默认 /chat/completions。
+    if not api_mode:
+        model_l = first_model.lower()
+        if model_l.startswith('claude-'):
+            api_mode = 'anthropic_messages'
+        elif model_l.startswith('gpt-5') or 'codex' in model_l:
+            api_mode = 'codex_responses'
+        else:
+            api_mode = 'chat_completions'
 
-    # 构造 models 列表（YAML 行）
-    if models:
-        first_model = models[0].get('id', '')
-        models_yaml = '\n'.join(
-            f'          - id: "{m["id"]}"\n            name: "{m.get("name", m["id"])}"'
-            for m in models
+    mode_aliases = {
+        'openai_chat': 'chat_completions',
+        'openai': 'chat_completions',
+        'openai_responses': 'codex_responses',
+        'responses': 'codex_responses',
+        'anthropic': 'anthropic_messages',
+    }
+    api_mode = mode_aliases.get(api_mode, api_mode)
+    valid_modes = {'anthropic_messages', 'codex_responses', 'chat_completions'}
+    if api_mode not in valid_modes:
+        print(f"  ⚠ 未知 api_mode={api_mode!r}，按 chat_completions 处理")
+        api_mode = 'chat_completions'
+
+    # Hermes 的 Anthropic SDK 对普通第三方域名固定发送 x-api-key；部分
+    # Claude Code 网关使用同一 Messages 协议，却要求 Authorization: Bearer。
+    # 套餐可显式设置 auth_mode=bearer。为兼容旧记录，若当前 Claude Code
+    # 配置的 URL 和 ANTHROPIC_AUTH_TOKEN 与套餐完全匹配，也自动判定为 bearer。
+    auth_mode = str(cfg.get('auth_mode') or cfg.get('auth_type') or '').strip().lower()
+    auth_aliases = {
+        'authorization_bearer': 'bearer',
+        'bearer_token': 'bearer',
+        'x-api-key': 'x_api_key',
+        'x_api_key': 'x_api_key',
+        'api_key': 'x_api_key',
+    }
+    auth_mode = auth_aliases.get(auth_mode, auth_mode)
+    if api_mode != 'anthropic_messages':
+        auth_mode = 'bearer' if auth_mode == 'bearer' else 'native'
+    elif not auth_mode:
+        try:
+            claude_settings_path = os.path.expanduser('~/.claude/settings.json')
+            with open(claude_settings_path) as f:
+                claude_env = (json.load(f) or {}).get('env', {})
+            claude_url = str(claude_env.get('ANTHROPIC_BASE_URL', '') or '').rstrip('/')
+            claude_token = str(claude_env.get('ANTHROPIC_AUTH_TOKEN', '') or '')
+            normalize_api_root = lambda value: _re.sub(r'/v1$', '', value.rstrip('/'))
+            if (claude_token and claude_token == api_key and claude_url
+                    and normalize_api_root(claude_url) == normalize_api_root(base_url)):
+                auth_mode = 'bearer'
+        except Exception:
+            pass
+    if api_mode == 'anthropic_messages' and not auth_mode:
+        auth_mode = 'x_api_key'
+    if api_mode == 'anthropic_messages' and auth_mode not in {'bearer', 'x_api_key'}:
+        print(f"  ⚠ 未知 auth_mode={auth_mode!r}，按 x_api_key 处理")
+        auth_mode = 'x_api_key'
+
+    hermes_bin = shutil.which('hermes')
+    if not hermes_bin:
+        print("  ⚠ 找不到 hermes 命令，无法校验或重启 Gateway")
+        return False
+
+    proxy_script = os.path.expanduser('~/hermes_auth_proxy.py')
+    proxy_port = int(os.environ.get('CCSWITCH_HERMES_PROXY_PORT', '18723'))
+    proxy_cfg_path = os.path.join(hermes_dir, 'ccswitch-auth-proxy.json')
+    proxy_pid_path = os.path.join(hermes_dir, 'ccswitch-auth-proxy.pid')
+    old_proxy_cfg = None
+    if os.path.exists(proxy_cfg_path):
+        with open(proxy_cfg_path, 'rb') as f:
+            old_proxy_cfg = f.read()
+
+    def proxy_pid():
+        try:
+            pid = int(open(proxy_pid_path).read().strip())
+            os.kill(pid, 0)
+            return pid
+        except Exception:
+            return None
+
+    old_proxy_was_running = proxy_pid() is not None
+
+    def stop_auth_proxy():
+        pid = proxy_pid()
+        if pid:
+            try:
+                os.kill(pid, 15)
+                for _ in range(20):
+                    time.sleep(0.1)
+                    if not proxy_pid():
+                        break
+            except Exception:
+                pass
+        try:
+            os.unlink(proxy_pid_path)
+        except FileNotFoundError:
+            pass
+
+    def launch_auth_proxy():
+        subprocess.Popen(
+            ['python3', proxy_script, '--daemon'],
+            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
         )
-    else:
-        first_model = ''
-        models_yaml = ''
+        import urllib.request
+        for _ in range(30):
+            time.sleep(0.1)
+            try:
+                with urllib.request.urlopen(f'http://127.0.0.1:{proxy_port}/health', timeout=1) as response:
+                    if response.status == 200:
+                        return True
+            except Exception:
+                pass
+        return False
 
-    # 读取现有 config
-    existing_yaml = ''
-    if os.path.exists(config_path):
+    proxy_changed = False
+
+    def restore_auth_proxy():
+        if not proxy_changed:
+            return
+        stop_auth_proxy()
+        if old_proxy_cfg is None:
+            try:
+                os.unlink(proxy_cfg_path)
+            except FileNotFoundError:
+                pass
+        else:
+            with open(proxy_cfg_path, 'wb') as f:
+                f.write(old_proxy_cfg)
+            os.chmod(proxy_cfg_path, 0o600)
+            if old_proxy_was_running and os.path.exists(proxy_script):
+                launch_auth_proxy()
+
+    provider_base_url = base_url
+    provider_api_key = api_key
+    if api_mode == 'anthropic_messages' and auth_mode == 'bearer':
+        if not os.path.exists(proxy_script):
+            print(f"  ⚠ Bearer 套餐需要认证桥，但未找到: {proxy_script}")
+            return False
+        proxy_data = {
+            'upstream_base_url': base_url,
+            'api_key': api_key,
+            'auth_mode': 'bearer',
+            'listen_host': '127.0.0.1',
+            'listen_port': proxy_port,
+        }
+        stop_auth_proxy()
+        tmp_proxy_cfg = proxy_cfg_path + '.tmp'
+        with open(tmp_proxy_cfg, 'w') as f:
+            json.dump(proxy_data, f, indent=2)
+        os.chmod(tmp_proxy_cfg, 0o600)
+        os.replace(tmp_proxy_cfg, proxy_cfg_path)
+        proxy_changed = True
+        if not launch_auth_proxy():
+            restore_auth_proxy()
+            print("  ⚠ Hermes Bearer 认证桥启动失败，请查看 ~/.hermes/ccswitch-auth-proxy.log")
+            return False
+        provider_base_url = f'http://127.0.0.1:{proxy_port}'
+        provider_api_key = 'ccswitch-local-auth-proxy'
+
+    def yq(value):
+        # JSON 双引号字符串也是合法 YAML，且可安全处理特殊字符。
+        return json.dumps(str(value), ensure_ascii=False)
+
+    block = [
+        '  - name: ccswitch-selected\n',
+        f'    base_url: {yq(provider_base_url)}\n',
+        f'    api_key: {yq(provider_api_key)}\n',
+        f'    api_mode: {yq(api_mode)}\n',
+    ]
+    if models:
+        block.append('    models:\n')
+        for model in models:
+            mid = str(model.get('id', '') or '').strip()
+            if not mid:
+                continue
+            mname = str(model.get('name', mid) or mid)
+            block.append(f'      - id: {yq(mid)}\n')
+            block.append(f'        name: {yq(mname)}\n')
+            context_length = model.get('context_length')
+            if isinstance(context_length, int) and context_length > 0:
+                block.append(f'        context_length: {context_length}\n')
+    if first_model:
+        block.append(f'    default_model: {yq(first_model)}\n')
+    provider_block = ''.join(block)
+
+    existing = ''
+    had_existing = os.path.exists(config_path)
+    if had_existing:
         with open(config_path) as f:
-            existing_yaml = f.read()
-        # 备份
+            existing = f.read()
         shutil.copy2(config_path, config_path + '.bak')
 
-    # 新的 custom provider 块（固定名称 custom:ccswitch-selected）
-    provider_block = (
-        f'      ccswitch-selected:\n'
-        f'        type: "{provider_type}"\n'
-        f'        base_url: "{base_url}/v1"\n'
-        f'        api_key: "{api_key}"\n'
-    )
-    if models_yaml:
-        provider_block += f'        models:\n{models_yaml}\n'
-    if first_model:
-        provider_block += f'        default_model: "{first_model}"\n'
-
-    # 替换 custom_providers.ccswitch-selected 块（若存在）；否则追加
-    import re as _re
-    pattern = r'(      ccswitch-selected:\n(?:[ \t]+[^\n]*\n)*)'
-    if _re.search(pattern, existing_yaml):
-        new_yaml = _re.sub(pattern, provider_block, existing_yaml, count=1)
+    lines = existing.splitlines(keepends=True)
+    cp_idx = next((i for i, line in enumerate(lines)
+                   if _re.match(r'^custom_providers:\s*(?:#.*)?$', line.rstrip('\n'))), None)
+    if cp_idx is None:
+        if existing and not existing.endswith('\n'):
+            existing += '\n'
+        new_yaml = existing + 'custom_providers:\n' + provider_block
     else:
-        # 找到 custom_providers: 节并追加；若不存在则整体追加
-        cp_pattern = r'(custom_providers:\s*\n)'
-        if _re.search(cp_pattern, existing_yaml):
-            new_yaml = _re.sub(cp_pattern, r'\1' + provider_block, existing_yaml, count=1)
+        section_end = len(lines)
+        for i in range(cp_idx + 1, len(lines)):
+            if _re.match(r'^[A-Za-z_][A-Za-z0-9_-]*:\s*', lines[i]):
+                section_end = i
+                break
+
+        entry_start = entry_end = None
+        # 正确的 list 形式。
+        for i in range(cp_idx + 1, section_end):
+            if _re.match(r'^  -\s+name:\s*["\']?ccswitch-selected["\']?\s*$', lines[i].rstrip('\n')):
+                entry_start = i
+                entry_end = section_end
+                for j in range(i + 1, section_end):
+                    if _re.match(r'^  -\s+', lines[j]):
+                        entry_end = j
+                        break
+                break
+        # 兼容并清理旧脚本写出的错误 dict 形式。
+        if entry_start is None:
+            for i in range(cp_idx + 1, section_end):
+                match = _re.match(r'^(\s+)ccswitch-selected:\s*$', lines[i].rstrip('\n'))
+                if match:
+                    indent = len(match.group(1))
+                    entry_start = i
+                    entry_end = section_end
+                    for j in range(i + 1, section_end):
+                        sibling = _re.match(r'^(\s+)[A-Za-z0-9_-]+:\s*', lines[j])
+                        if sibling and len(sibling.group(1)) == indent:
+                            entry_end = j
+                            break
+                    break
+
+        if entry_start is None:
+            lines[cp_idx + 1:cp_idx + 1] = [provider_block]
         else:
-            new_yaml = existing_yaml.rstrip() + '\ncustom_providers:\n' + provider_block
+            lines[entry_start:entry_end] = [provider_block]
+        new_yaml = ''.join(lines)
 
-    with open(config_path, 'w') as f:
-        f.write(new_yaml)
-    print(f"  已写入: {config_path}")
-
-    # 重启 Hermes Gateway（若正在运行）
-    gw_running = False
-    try:
-        result_gw = subprocess.run(
-            ['hermes', 'gateway', 'status'],
-            capture_output=True, text=True, timeout=5
+    # 套餐切换时同步更新全局默认模型，CLI/新会话无需再次手工 /model。
+    if first_model:
+        model_block = (
+            'model:\n'
+            f'  default: {yq(first_model)}\n'
+            '  provider: custom:ccswitch-selected\n'
         )
-        gw_running = 'running' in result_gw.stdout.lower() or result_gw.returncode == 0
-    except Exception:
-        pass
+        model_pattern = _re.compile(r'^model:\s*\n(?:^[ \t]+.*\n)*', _re.MULTILINE)
+        if model_pattern.search(new_yaml):
+            new_yaml = model_pattern.sub(model_block, new_yaml, count=1)
+        else:
+            new_yaml = model_block + new_yaml
 
-    if gw_running:
+    # 若系统 Python 已安装 PyYAML，写前做严格语法检查；未安装时由
+    # Hermes 自己的 `config check` 在写后验证，避免增加 Toolkit 依赖。
+    try:
+        import yaml
+    except ImportError:
+        yaml = None
+    if yaml is not None:
+        try:
+            parsed = yaml.safe_load(new_yaml)
+            if not isinstance(parsed, dict) or not isinstance(parsed.get('custom_providers'), list):
+                raise ValueError('custom_providers 必须是 YAML list')
+        except Exception as exc:
+            restore_auth_proxy()
+            print(f"  ⚠ 生成的 Hermes YAML 无效，已取消写入: {exc}")
+            return False
+
+    tmp_path = config_path + '.tmp.ccswitch'
+    with open(tmp_path, 'w') as f:
+        f.write(new_yaml)
+    os.replace(tmp_path, config_path)
+
+    def restore_config():
+        if had_existing:
+            shutil.copy2(config_path + '.bak', config_path)
+        else:
+            try:
+                os.unlink(config_path)
+            except FileNotFoundError:
+                pass
+
+    # 使用 Hermes 自带解析器做轻量检查；失败时自动回滚。
+    try:
+        check = subprocess.run([hermes_bin, 'config', 'check'], capture_output=True,
+                               text=True, timeout=20)
+        check_text = (check.stdout or '') + (check.stderr or '')
+    except Exception as exc:
+        restore_config()
+        restore_auth_proxy()
+        print(f"  ⚠ 无法校验 Hermes 配置，已恢复备份: {exc}")
+        return False
+    invalid_markers = (
+        'failed to parse',
+        'custom_providers is a dict',
+        'must be a yaml list',
+        'yaml syntax',
+    )
+    if check.returncode != 0 or any(marker in check_text.lower() for marker in invalid_markers):
+        restore_config()
+        restore_auth_proxy()
+        detail = next((line.strip() for line in check_text.splitlines() if line.strip()),
+                      f'exit {check.returncode}')
+        print(f"  ⚠ Hermes 配置校验失败，已恢复备份: {detail}")
+        return False
+
+    if not (api_mode == 'anthropic_messages' and auth_mode == 'bearer'):
+        stop_auth_proxy()
+
+    print(f"  已写入: {config_path}")
+    print(f"  协议: {api_mode}  模型: {first_model or '(未指定)'}")
+    if api_mode == 'anthropic_messages':
+        print(f"  认证: {auth_mode}")
+    print(f"  上游: {base_url}")
+
+    try:
+        status = subprocess.run([hermes_bin, 'gateway', 'status'], capture_output=True,
+                                text=True, timeout=10)
+        running = 'active (running)' in ((status.stdout or '') + (status.stderr or '')).lower()
+    except Exception:
+        running = False
+
+    if running:
         print("  正在重启 Hermes Gateway...")
         try:
-            subprocess.run(['hermes', 'gateway', 'stop'], timeout=10, check=False)
-            import time; time.sleep(1)
-            subprocess.run(['hermes', 'gateway', 'start'], timeout=10, check=False)
-            time.sleep(1.5)
+            subprocess.run([hermes_bin, 'gateway', 'stop'], timeout=20, check=False)
+            time.sleep(1)
+            subprocess.run([hermes_bin, 'gateway', 'start'], timeout=20, check=False)
+            time.sleep(2)
             print("  Hermes Gateway 已重启")
-        except Exception as e:
-            print(f"  ⚠ Gateway 重启失败（{e}），请手动执行: hermes gateway restart")
+        except Exception as exc:
+            print(f"  ⚠ Gateway 重启失败，请手动执行 hermes gateway restart: {exc}")
     else:
         print("  提示: Hermes Gateway 未运行，启动时将自动加载新配置")
 
     if first_model:
-        print(f"\n  ⚡ 记得在 Telegram 发送:")
+        print("\n  新 CLI/Telegram 会话会自动使用新模型。")
+        print("  若 Telegram 旧会话保留了覆盖，可发送:")
         print(f"     /model {first_model} --provider custom:ccswitch-selected")
-
     return True
 
 # 执行对应的写入；apply_* 返回 False 表示失败，跳过 currentProvider 更新

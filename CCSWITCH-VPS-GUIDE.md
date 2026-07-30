@@ -2,20 +2,21 @@
 
 本文档说明 `~/Documents/code/071/` 中 CC Switch VPS 同步方案的使用方法、工作原理、开发过程和复用注意事项。
 
-整理日期：2026-07-22
+整理日期：2026-07-30
 
 ## 1. 先看结论
 
 `text.text` 不是可执行脚本，而是此前开发和排查过程留下的对话记录。记录中有重复、截断和已经过时的命令，不应直接照着执行。
 
-真正使用的是以下三个文件：
+真正使用的是以下文件：
 
 | 文件 | 在哪里运行 | 作用 |
 |---|---|---|
 | `sync-ccswitch-to-vps.sh` | 本机 macOS | 把本机 CC Switch 配置和切换脚本同步到 VPS |
-| `ccswitch-select.sh` | 由同步脚本部署到 VPS | 在 VPS 上读取数据库并切换 Claude、Codex、Gemini、OpenClaw 套餐 |
+| `ccswitch-select.sh` | 由同步脚本部署到 VPS | 在 VPS 上读取数据库并切换 Claude、Codex、Gemini、OpenClaw、Hermes 套餐 |
 | `claude_proxy.py` | 由同步脚本部署到 VPS | 将 Claude Code 的 Anthropic Messages 请求转换为 OpenAI Chat 请求 |
 | `codex_proxy.py` | 由同步脚本部署到 VPS | Codex Responses 代理：剥离上游不兼容的工具字段（namespace 等），保持 Responses 协议 |
+| `hermes_auth_proxy.py` | 由同步脚本部署到 VPS | 为 Claude Code 风格的 Hermes 套餐将 `x-api-key` 替换为 Bearer 认证，不转换 Messages 协议 |
 | `test-ccswitch-providers.py` | 本机或 VPS | 对 Claude/Codex 套餐发起真实 API 请求，检查连通性和模型映射 |
 
 最常用的操作只有两步：
@@ -63,6 +64,7 @@ SSH + rsync
     +--> Codex:       ~/.codex/config.toml + auth.json (可能经 codex_proxy.py:18722)
     +--> Gemini:      ~/.cc-switch/gemini.env
     +--> OpenClaw:    ~/.openclaw/config.json
+    +--> Hermes:      ~/.hermes/config.yaml（原生 API 模式；Bearer 套餐可能经认证桥 :18723）
 ```
 
 VPS 不需要安装 CC Switch GUI。`ccswitch-select` 直接读取同步过来的 SQLite 数据库。
@@ -168,6 +170,9 @@ ccswitch-select claude
 
 # 直接进入 Codex 套餐列表
 ccswitch-select codex
+
+# 直接进入 Hermes Gateway 套餐列表
+ccswitch-select hermes
 ```
 
 选择完成后正常启动对应 CLI：
@@ -204,6 +209,7 @@ ccswitch-select claude 2
 ccswitch-select codex 3
 ccswitch-select gemini 1
 ccswitch-select openclaw 1
+ccswitch-select hermes 1
 ```
 
 参数格式：
@@ -220,6 +226,7 @@ ccswitch-select <app_type> <套餐编号>
 | `codex` | Codex |
 | `gemini` | Gemini CLI |
 | `openclaw` | OpenClaw |
+| `hermes` | Hermes Gateway |
 
 `claude-desktop` 是桌面 GUI 配置，VPS 脚本有意忽略。
 
@@ -416,6 +423,14 @@ tail -n 100 ~/codex_proxy.log
 curl -s http://127.0.0.1:18722/health
 ```
 
+Hermes Bearer 认证桥（只在对应套餐选中时运行）：
+
+```bash
+cat ~/.hermes/ccswitch-auth-proxy.pid
+tail -n 100 ~/.hermes/ccswitch-auth-proxy.log
+curl -s http://127.0.0.1:18723/health
+```
+
 切换 Codex 套餐后，Codex CLI 需要重新启动才能读取新配置：
 
 ```bash
@@ -475,6 +490,76 @@ source ~/.bashrc
 
 脚本会更新 `models.providers` 为当前选择的 provider 配置。
 
+### 7.5 Hermes Gateway
+
+目标文件：
+
+```text
+~/.hermes/config.yaml
+```
+
+Hermes 原生支持多种上游协议，因此不复用 Claude Code 的协议转换代理
+`claude_proxy.py:18721`，也不复用 Codex 的字段清理代理 `codex_proxy.py:18722`。
+Responses 套餐和标准 `x-api-key` Anthropic 套餐原生直连；使用 Claude Code
+`ANTHROPIC_AUTH_TOKEN` 的 Bearer 网关则经 `hermes_auth_proxy.py:18723`。该认证桥
+只替换认证 Header 和客户端标识，Messages 请求体、路径与响应均不转换。
+
+脚本写入名为 `ccswitch-selected` 的 custom provider，并同步更新 Hermes 顶层默认模型：
+
+```yaml
+model:
+  default: gpt-5.6-sol
+  provider: custom:ccswitch-selected
+custom_providers:
+  - name: ccswitch-selected
+    base_url: "https://api.example.com/v1"
+    api_key: "..."
+    api_mode: codex_responses
+    models:
+      - id: gpt-5.6-sol
+        name: GPT 5.6 Sol
+    default_model: gpt-5.6-sol
+```
+
+`custom_providers` 必须是 YAML **list**，不能写成以 provider 名称为键的 dict。
+`base_url` 应填写完整 API root，并原样保留。例如上游根地址已经是
+`https://api.example.com/v1` 时，不能再次追加 `/v1`。
+
+套餐源记录建议显式填写 `api_mode`：
+
+| 上游协议 | `api_mode` | Hermes 请求路径 |
+|---|---|---|
+| OpenAI Responses / Codex | `codex_responses` | `<base_url>/responses` |
+| Anthropic Messages / Claude | `anthropic_messages` | `<base_url>/messages` |
+| OpenAI Chat Completions | `chat_completions` | `<base_url>/chat/completions` |
+
+Anthropic 套餐还建议显式填写认证方式：
+
+```json
+{
+  "api_mode": "anthropic_messages",
+  "auth_mode": "bearer"
+}
+```
+
+`auth_mode: "x_api_key"` 直接连接上游；`auth_mode: "bearer"` 启动仅监听
+`127.0.0.1:18723` 的认证桥。为兼容旧记录，如果套餐 URL/key 与本机同步来的
+Claude Code `ANTHROPIC_BASE_URL`/`ANTHROPIC_AUTH_TOKEN` 完全匹配，脚本也会
+自动识别为 Bearer。切换回 Responses 或标准 `x-api-key` 套餐时会停止认证桥。
+
+为兼容旧数据，缺少 `api_mode` 时脚本会根据第一个模型推断：`claude-*` 使用
+`anthropic_messages`，`gpt-5*` 或名称包含 `codex` 使用 `codex_responses`，
+其余使用 `chat_completions`。模型推断只是兼容措施，新套餐不要依赖它。
+
+写入后脚本运行 `hermes config check`；校验失败会恢复备份，并且不会更新
+`currentProviderHermes`。如果 Gateway 正在运行，脚本会 stop/start 使新配置生效。
+新 CLI 或 Telegram 会话使用新默认模型；已有 Telegram 会话若保留 `/model`
+覆盖，可手工发送：
+
+```text
+/model <模型> --provider custom:ccswitch-selected
+```
+
 ## 8. 测试脚本怎么用
 
 `test-ccswitch-providers.py` 支持独立测试 Claude 或 Codex 套餐。同步完成后，它位于 VPS 的 `~/.local/bin`。
@@ -516,6 +601,19 @@ Codex 测试仅测 wire_api=responses 的套餐，其他格式自动跳过。
 测试结果受上游服务、余额、限流和网络状态影响。
 ```
 
+Hermes 切换逻辑的离线回归测试不会调用真实 API：
+
+```bash
+bash tests/test_hermes_switch.sh
+python3 tests/test_hermes_auth_proxy.py
+```
+
+它使用临时数据库、临时 HOME 和假的 `hermes` 命令，验证 Responses 与
+Anthropic 两种套餐切换、URL 不重复追加 `/v1`、YAML list、默认模型、其他
+配置保留、Bearer 自动识别、认证 Header/Claude Code 客户端标识替换、认证桥
+启停，以及 `hermes config check` 失败时自动回滚。上游连通性仍需另行发送
+真实请求验证；离线测试通过不代表第三方上游当前没有 5xx 故障。
+
 ## 9. 安全注意事项
 
 以下文件包含或可能包含 API key：
@@ -527,9 +625,11 @@ Codex 测试仅测 wire_api=responses 的套餐，其他格式自动跳过。
 ~/.codex/auth.json
 ~/proxy_config.json
 ~/codex_proxy_config.json
+~/.hermes/ccswitch-auth-proxy.json
 ```
 
-`codex_proxy.py` 不记录 Authorization、API key、完整请求体或工具参数。日志只包含模型名、`stream` 标志、工具数量和 HTTP 状态码。
+本地代理不记录 Authorization、API key、完整请求体或工具参数。Hermes 认证桥
+日志只包含模型名、`stream` 标志、请求字节数和 HTTP 状态码。
 
 要求：
 
@@ -628,6 +728,20 @@ ccswitch-select claude
 ```
 
 先确认当前 URL、模型和代理日志，不要把 API key 打印到终端历史或发给他人。
+
+### 10.7 Hermes 返回 404 或 502
+
+先检查当前 Hermes 配置，但不要输出 `api_key`：
+
+```bash
+hermes config check
+ccswitch-select hermes
+```
+
+404 通常表示 `base_url` 或 `api_mode` 不匹配，例如把已有 `/v1` 的 URL 再追加
+成 `/v1/v1`，或 Responses 套餐误走 `/chat/completions`。502 表示请求已到达
+网关但网关或其 origin 异常；如果同一 URL 的最小原生请求也持续返回 502，
+通常是第三方上游故障，不是本地 Hermes 切换逻辑错误。
 
 ## 11. 开发过程记录
 
@@ -764,6 +878,17 @@ VPS 启动 claude_proxy.py 监听 127.0.0.1:18721。
 将 text.text 明确标记为历史记录，不作为可执行说明。
 ```
 
+### 阶段 10：2026-07-30 Hermes 原生路由修正
+
+Hermes 不复用 Claude Code/Codex 的本地协议转换代理。`ccswitch-select` 现在将
+custom provider 写成 Hermes 要求的 YAML list，保留完整 `base_url`，并使用
+`api_mode` 在 `codex_responses`、`anthropic_messages` 与 `chat_completions` 之间
+选择原生请求路径。切换时同时更新全局默认模型，校验失败自动回滚。
+
+已增加 `tests/test_hermes_switch.sh`，覆盖两类套餐切换、旧配置迁移、其他配置
+保留和失败回滚。真实 API 测试与离线回归应分开记录，因为第三方上游 5xx
+不能靠本地配置修复。
+
 ## 12. 复用和维护清单
 
 给另一位开发者或 AI 接手时，按以下顺序阅读：
@@ -773,8 +898,9 @@ VPS 启动 claude_proxy.py 监听 127.0.0.1:18721。
 2. 读 sync-ccswitch-to-vps.sh，确认同步范围和目标路径。
 3. 读 ccswitch-select.sh，确认各 app_type 的写入逻辑。
 4. 读 claude_proxy.py，确认 Anthropic 与 OpenAI Chat 的转换边界。
-5. 只在需要真实连通性测试时运行 test-ccswitch-providers.py。
-6. 不要把 text.text 当作当前实现的事实来源。
+5. 修改 Hermes 切换逻辑后运行 tests/test_hermes_switch.sh。
+6. 只在需要真实连通性测试时运行 test-ccswitch-providers.py。
+7. 不要把 text.text 当作当前实现的事实来源。
 ```
 
 修改脚本后至少执行：
@@ -783,6 +909,7 @@ VPS 启动 claude_proxy.py 监听 127.0.0.1:18721。
 cd ~/Documents/code/071
 bash -n sync-ccswitch-to-vps.sh
 bash -n ccswitch-select.sh
+bash tests/test_hermes_switch.sh
 python3 -m py_compile claude_proxy.py
 python3 -m py_compile test-ccswitch-providers.py
 ```

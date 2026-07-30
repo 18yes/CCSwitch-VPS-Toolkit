@@ -26,6 +26,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 SWITCHER_SCRIPT="$SCRIPT_DIR/ccswitch-select.sh"
 PROXY_SCRIPT="$SCRIPT_DIR/claude_proxy.py"
 CODEX_PROXY_SCRIPT="$SCRIPT_DIR/codex_proxy.py"
+HERMES_AUTH_PROXY_SCRIPT="$SCRIPT_DIR/hermes_auth_proxy.py"
 TEST_SCRIPT="$SCRIPT_DIR/test-ccswitch-providers.py"
 
 log()  { echo "[$(date '+%H:%M:%S')] $*"; }
@@ -84,6 +85,12 @@ do_sync() {
   if [[ -f "$CODEX_PROXY_SCRIPT" ]]; then
     rsync -az -e "ssh $SSH_OPTS" "$CODEX_PROXY_SCRIPT" "$VPS:~/codex_proxy.py"
     ssh $SSH_OPTS "$VPS" "chmod 700 ~/codex_proxy.py"
+  fi
+
+  # 部署 Hermes Anthropic Bearer 认证桥（仅回环监听，不转换协议）
+  if [[ -f "$HERMES_AUTH_PROXY_SCRIPT" ]]; then
+    rsync -az -e "ssh $SSH_OPTS" "$HERMES_AUTH_PROXY_SCRIPT" "$VPS:~/hermes_auth_proxy.py"
+    ssh $SSH_OPTS "$VPS" "chmod 700 ~/hermes_auth_proxy.py"
   fi
 
   # 部署连通性测试工具
