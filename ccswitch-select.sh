@@ -6,6 +6,7 @@
 #   ccswitch-select codex     # 直接切换 Codex 套餐
 #   ccswitch-select gemini    # 直接切换 Gemini 套餐
 #   ccswitch-select openclaw  # 直接切换 OpenClaw 套餐
+#   ccswitch-select hermes    # 直接切换 Hermes Gateway 套餐
 set -euo pipefail
 
 DB="$HOME/.cc-switch/cc-switch.db"
@@ -49,6 +50,7 @@ SUPPORTED = {
     'codex':    'Codex',
     'gemini':   'Gemini CLI',
     'openclaw': 'OpenClaw (龙虾)',
+    'hermes':   'Hermes Gateway',
 }
 
 # --- 统计各 app 类型的套餐数量 ---
@@ -96,6 +98,7 @@ CURRENT_KEY = {
     'codex':    'currentProviderCodex',
     'gemini':   'currentProviderGemini',
     'openclaw': 'currentProviderOpenclaw',
+    'hermes':   'currentProviderHermes',
 }.get(app_type, '')
 current_id = cc_settings.get(CURRENT_KEY, '')
 
@@ -123,6 +126,7 @@ for pid, name, cfg_raw in rows:
         env = cfg.get('env', {})
         base_url = (env.get('ANTHROPIC_BASE_URL') or
                     env.get('GOOGLE_GEMINI_BASE_URL') or
+                    cfg.get('base_url') or
                     cfg.get('baseUrl') or
                     cfg.get('config','').split('base_url')[1].split('"')[1] if 'base_url' in cfg.get('config','') else '')
     except Exception:
@@ -436,12 +440,130 @@ def apply_openclaw(cfg):
         json.dump(existing, f, indent=2, ensure_ascii=False)
     print(f"已写入: {path}")
 
+def apply_hermes(cfg):
+    """更新 ~/.hermes/config.yaml 中 custom:ccswitch-selected 自定义 Provider 配置。
+
+    Hermes 套餐的 settings_config 格式（来自 CC Switch 数据库）：
+      {
+        "base_url": "https://...",
+        "api_key":  "sk-...",
+        "api_mode": "anthropic_messages" | "openai_chat" | ...,  # 可选
+        "models":   [{"id": "...", "name": "..."}]              # 可选
+      }
+
+    写入目标：~/.hermes/config.yaml 中 custom_providers 块下的
+      custom:ccswitch-selected 条目，保留文件其余内容不变。
+
+    切换后仍需在 Telegram 发送 /model <模型名> --provider custom:ccswitch-selected
+    使当前会话覆盖与新套餐一致（详见运维手册）。
+    """
+    import subprocess, shutil
+
+    hermes_dir  = os.path.expanduser('~/.hermes')
+    config_path = os.path.join(hermes_dir, 'config.yaml')
+    os.makedirs(hermes_dir, exist_ok=True)
+
+    base_url = cfg.get('base_url', '').rstrip('/')
+    api_key  = cfg.get('api_key', '')
+    api_mode = cfg.get('api_mode', '')   # 'anthropic_messages' / 'openai_chat' 等
+    models   = cfg.get('models', [])
+
+    if not base_url:
+        print("  ⚠ 套餐缺少 base_url，无法更新 Hermes 配置")
+        return False
+
+    # 决定 Hermes 的 provider_type
+    # anthropic_messages → anthropic；其余默认 openai
+    if api_mode == 'anthropic_messages':
+        provider_type = 'anthropic'
+    else:
+        provider_type = 'openai'
+
+    # 构造 models 列表（YAML 行）
+    if models:
+        first_model = models[0].get('id', '')
+        models_yaml = '\n'.join(
+            f'          - id: "{m["id"]}"\n            name: "{m.get("name", m["id"])}"'
+            for m in models
+        )
+    else:
+        first_model = ''
+        models_yaml = ''
+
+    # 读取现有 config
+    existing_yaml = ''
+    if os.path.exists(config_path):
+        with open(config_path) as f:
+            existing_yaml = f.read()
+        # 备份
+        shutil.copy2(config_path, config_path + '.bak')
+
+    # 新的 custom provider 块（固定名称 custom:ccswitch-selected）
+    provider_block = (
+        f'      ccswitch-selected:\n'
+        f'        type: "{provider_type}"\n'
+        f'        base_url: "{base_url}/v1"\n'
+        f'        api_key: "{api_key}"\n'
+    )
+    if models_yaml:
+        provider_block += f'        models:\n{models_yaml}\n'
+    if first_model:
+        provider_block += f'        default_model: "{first_model}"\n'
+
+    # 替换 custom_providers.ccswitch-selected 块（若存在）；否则追加
+    import re as _re
+    pattern = r'(      ccswitch-selected:\n(?:[ \t]+[^\n]*\n)*)'
+    if _re.search(pattern, existing_yaml):
+        new_yaml = _re.sub(pattern, provider_block, existing_yaml, count=1)
+    else:
+        # 找到 custom_providers: 节并追加；若不存在则整体追加
+        cp_pattern = r'(custom_providers:\s*\n)'
+        if _re.search(cp_pattern, existing_yaml):
+            new_yaml = _re.sub(cp_pattern, r'\1' + provider_block, existing_yaml, count=1)
+        else:
+            new_yaml = existing_yaml.rstrip() + '\ncustom_providers:\n' + provider_block
+
+    with open(config_path, 'w') as f:
+        f.write(new_yaml)
+    print(f"  已写入: {config_path}")
+
+    # 重启 Hermes Gateway（若正在运行）
+    gw_running = False
+    try:
+        result_gw = subprocess.run(
+            ['hermes', 'gateway', 'status'],
+            capture_output=True, text=True, timeout=5
+        )
+        gw_running = 'running' in result_gw.stdout.lower() or result_gw.returncode == 0
+    except Exception:
+        pass
+
+    if gw_running:
+        print("  正在重启 Hermes Gateway...")
+        try:
+            subprocess.run(['hermes', 'gateway', 'stop'], timeout=10, check=False)
+            import time; time.sleep(1)
+            subprocess.run(['hermes', 'gateway', 'start'], timeout=10, check=False)
+            time.sleep(1.5)
+            print("  Hermes Gateway 已重启")
+        except Exception as e:
+            print(f"  ⚠ Gateway 重启失败（{e}），请手动执行: hermes gateway restart")
+    else:
+        print("  提示: Hermes Gateway 未运行，启动时将自动加载新配置")
+
+    if first_model:
+        print(f"\n  ⚡ 记得在 Telegram 发送:")
+        print(f"     /model {first_model} --provider custom:ccswitch-selected")
+
+    return True
+
 # 执行对应的写入；apply_* 返回 False 表示失败，跳过 currentProvider 更新
 result = {
     'claude':   apply_claude,
     'codex':    apply_codex,
     'gemini':   apply_gemini,
     'openclaw': apply_openclaw,
+    'hermes':   apply_hermes,
 }[app_type](cfg)
 
 apply_ok = (result is not False)  # None/True 均视为成功
