@@ -104,7 +104,7 @@ current_id = cc_settings.get(CURRENT_KEY, '')
 
 # --- 列出该 app 的所有套餐 ---
 rows = conn.execute(
-    "SELECT id, name, settings_config FROM providers WHERE app_type=? ORDER BY rowid",
+    "SELECT id, name, settings_config, COALESCE(notes,'') FROM providers WHERE app_type=? ORDER BY rowid",
     (app_type,)
 ).fetchall()
 
@@ -114,26 +114,34 @@ if not rows:
 
 print(f"\n{SUPPORTED.get(app_type, app_type)} 套餐列表:\n")
 providers = []
-for pid, name, cfg_raw in rows:
+for pid, name, cfg_raw, db_notes in rows:
     pid_short = pid.replace(f'universal-{app_type}-', '')
     u = universal.get(pid_short, {})
-    notes = u.get('notes', '')
+    notes = u.get('notes', '') or db_notes  # 优先 universal_providers，其次 providers.notes 列
     label = notes if notes else name
-    # 提取 base_url 用于显示
-    base_url = ''
-    try:
-        cfg = json.loads(cfg_raw) if cfg_raw else {}
-        env = cfg.get('env', {})
-        base_url = (env.get('ANTHROPIC_BASE_URL') or
-                    env.get('GOOGLE_GEMINI_BASE_URL') or
-                    cfg.get('base_url') or
-                    cfg.get('baseUrl') or
-                    cfg.get('config','').split('base_url')[1].split('"')[1] if 'base_url' in cfg.get('config','') else '')
-    except Exception:
-        pass
-    url_short = base_url.replace('https://','').replace('http://','').split('/')[0]
-    marker = " ← 当前" if pid == current_id else ""
-    print(f"  [{len(providers)+1}] {label:<32} {url_short}{marker}")
+    # 检测是否需要路由代理（Hermes 本身是 Gateway，不显示路由标签）
+    needs_route = False
+    if app_type != 'hermes':
+        try:
+            cfg = json.loads(cfg_raw) if cfg_raw else {}
+            env = cfg.get('env', {})
+            model_chk = (env.get('ANTHROPIC_MODEL', '') or
+                         env.get('ANTHROPIC_DEFAULT_SONNET_MODEL', '') or
+                         cfg.get('model', '')).split('[')[0]
+            if model_chk:
+                needs_route = not any(model_chk.startswith(p) for p in
+                                      ('claude-', 'deepseek-', 'gemini-', 'gpt-image'))
+            else:
+                import re as _re2
+                config_str = cfg.get('config', '')
+                m = _re2.search(r'^wire_api\s*=\s*"([^"]*)"', config_str, _re2.MULTILINE)
+                needs_route = bool(m and m.group(1) == 'responses')
+        except Exception:
+            pass
+    route_tag = ' [路由]' if needs_route else ''
+    marker = ' ← 当前' if pid == current_id else ''
+    right = name if label != name else ''
+    print(f"  [{len(providers)+1}] {label + route_tag:<36} {right}{marker}")
     providers.append({'id': pid, 'name': name, 'cfg_raw': cfg_raw, 'label': label})
 
 print()
