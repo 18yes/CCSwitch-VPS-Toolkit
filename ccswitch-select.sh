@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
 # VPS 端：交互式切换 cc-switch 套餐（支持所有 app 类型）
-# 用法: ccswitch-select [app类型]
+# 用法: ccswitch-select [app类型] [编号] [--test]
 #   ccswitch-select           # 交互式选择 app 类型
 #   ccswitch-select claude    # 直接切换 Claude Code CLI 套餐
 #   ccswitch-select codex     # 直接切换 Codex 套餐
 #   ccswitch-select gemini    # 直接切换 Gemini 套餐
 #   ccswitch-select openclaw  # 直接切换 OpenClaw 套餐
 #   ccswitch-select hermes    # 直接切换 Hermes Gateway 套餐
+#   ccswitch-select --test [app类型]  # 检测所有套餐连通性
 set -euo pipefail
 
 DB="$HOME/.cc-switch/cc-switch.db"
@@ -17,11 +18,168 @@ die() { echo "错误: $*" >&2; exit 1; }
 command -v sqlite3 &>/dev/null || die "需要 sqlite3: sudo apt install sqlite3"
 command -v python3 &>/dev/null || die "需要 python3"
 
-APP_TYPE="${1:-}"
-PROVIDER_NUM="${2:-}"  # 可选：直接传套餐编号，跳过交互
+APP_TYPE=""
+PROVIDER_NUM=""
+TEST_MODE=""
+for arg in "$@"; do
+  case "$arg" in
+    --test) TEST_MODE="1" ;;
+    [0-9]*) PROVIDER_NUM="$arg" ;;
+    *)      [[ -z "$APP_TYPE" ]] && APP_TYPE="$arg" ;;
+  esac
+done
 
-python3 - "$DB" "$CC_SETTINGS" "$APP_TYPE" "$PROVIDER_NUM" <<'PYEOF'
+python3 - "$DB" "$CC_SETTINGS" "$APP_TYPE" "$PROVIDER_NUM" "$TEST_MODE" <<'PYEOF'
 import sys, json, os, re
+
+# ANSI colors
+GREEN  = '\033[32m'
+RED    = '\033[31m'
+YELLOW = '\033[33m'
+CYAN   = '\033[36m'
+DIM    = '\033[2m'
+BOLD   = '\033[1m'
+RESET  = '\033[0m'
+
+def run_test_mode(app_type_filter, db_path, cc_settings_path):
+    import urllib.request, urllib.error, threading, time, sqlite3 as _sqlite3
+    conn2 = _sqlite3.connect(db_path)
+    row2 = conn2.execute("SELECT value FROM settings WHERE key='universal_providers'").fetchone()
+    univ2 = json.loads(row2[0]) if row2 else {}
+    try:
+        with open(cc_settings_path) as f2:
+            ccs2 = json.load(f2)
+    except Exception:
+        ccs2 = {}
+    CURRENT_KEYS2 = {
+        'claude': 'currentProviderClaude', 'codex': 'currentProviderCodex',
+        'gemini': 'currentProviderGemini', 'openclaw': 'currentProviderOpenclaw',
+        'hermes': 'currentProviderHermes',
+    }
+    SUPPORTED2 = {
+        'claude': 'Claude Code CLI', 'codex': 'Codex', 'gemini': 'Gemini CLI',
+        'openclaw': 'OpenClaw', 'hermes': 'Hermes Gateway',
+    }
+    def get_base_url2(app_type, cfg_raw):
+        try:
+            cfg = json.loads(cfg_raw) if cfg_raw else {}
+            env = cfg.get('env', {})
+            url = (env.get('ANTHROPIC_BASE_URL') or env.get('GOOGLE_GEMINI_BASE_URL') or
+                   cfg.get('base_url') or cfg.get('baseUrl') or '')
+            if not url:
+                m = re.search(r'^base_url\s*=\s*"([^"]*)"', cfg.get('config',''), re.MULTILINE)
+                url = m.group(1) if m else ''
+            return url.rstrip('/')
+        except Exception:
+            return ''
+    def check_url2(url, timeout=6):
+        if not url:
+            return 'skip', 0, ''
+        start = time.time()
+        try:
+            req = urllib.request.Request(url + '/', method='HEAD')
+            req.add_header('User-Agent', 'ccswitch-test/1.0')
+            urllib.request.urlopen(req, timeout=timeout)
+            return 'ok', int((time.time()-start)*1000), ''
+        except urllib.error.HTTPError:
+            return 'ok', int((time.time()-start)*1000), ''
+        except Exception as e:
+            ms = int((time.time()-start)*1000)
+            err = str(e)
+            if 'timed out' in err.lower() or 'timeout' in err.lower():
+                return 'timeout', ms, ''
+            if 'refused' in err.lower():
+                return 'error', ms, ''
+            return 'error', ms, err[:30]
+    app_types = [app_type_filter] if app_type_filter in SUPPORTED2 else list(SUPPORTED2.keys())
+    for app_type in app_types:
+        rows2 = conn2.execute(
+            "SELECT id, name, COALESCE(notes,''), settings_config FROM providers WHERE app_type=? ORDER BY rowid",
+            (app_type,)
+        ).fetchall()
+        if not rows2: continue
+        current_id2 = ccs2.get(CURRENT_KEYS2.get(app_type, ''), '')
+        print(f"\n{BOLD}{SUPPORTED2[app_type]} ({len(rows2)}){RESET}")
+        print('-' * 58)
+        print('  ' + YELLOW + '  ...' + RESET, end='', flush=True)
+        results2 = [None] * len(rows2)
+        def do_check2(idx, cfg_raw2):
+            results2[idx] = check_url2(get_base_url2(app_type, cfg_raw2))
+        threads2 = []
+        for i2, (pid2, name2, db_notes2, cfg_raw2) in enumerate(rows2):
+            t2 = threading.Thread(target=do_check2, args=(i2, cfg_raw2))
+            t2.start(); threads2.append(t2)
+        for t2 in threads2: t2.join(timeout=8)
+        print('\r' + ' '*30 + '\r', end='')
+        ok_count2 = 0
+        for i2, (pid2, name2, db_notes2, cfg_raw2) in enumerate(rows2):
+            pid_short2 = pid2.replace(f'universal-{app_type}-', '')
+            notes2 = univ2.get(pid_short2, {}).get('notes', '') or db_notes2
+            label2 = notes2 if notes2 else name2
+            marker2 = f' {CYAN}<- current{RESET}' if pid2 == current_id2 else ''
+            st2, ms2, err2 = results2[i2] if results2[i2] else ('skip', 0, '')
+            if st2 == 'ok':
+                ok_count2 += 1
+                s2 = f'{GREEN}v{RESET} {DIM}{ms2}ms{RESET}'
+            elif st2 == 'timeout':
+                s2 = f'{RED}x{RESET} {YELLOW}timeout{RESET}'
+            elif st2 == 'skip':
+                s2 = f'{DIM}- no url{RESET}'
+            else:
+                s2 = f'{RED}x{RESET} {DIM}error{RESET}'
+            print(f'  [{i2+1}] {label2:<32} {s2}{marker2}')
+        print('-' * 58)
+        fc2 = len(rows2) - ok_count2
+        print(f'  {GREEN}{ok_count2} ok{RESET}   {RED if fc2 else DIM}{fc2} fail{RESET}')
+    conn2.close()
+
+def verify_after_switch(app_type, cfg):
+    import urllib.request, urllib.error, time
+    print('  ', end='', flush=True)
+    if app_type == 'hermes':
+        import subprocess, shutil
+        hbin = shutil.which('hermes')
+        if hbin:
+            try:
+                r = subprocess.run([hbin, 'gateway', 'status'], capture_output=True, text=True, timeout=5)
+                txt = (r.stdout + r.stderr).lower()
+                if 'running' in txt:
+                    print(f'{GREEN}v{RESET} Hermes Gateway running')
+                else:
+                    print(f'{YELLOW}!{RESET} Hermes Gateway not running')
+            except Exception:
+                print(f'{DIM}? hermes status check failed{RESET}')
+        return
+    env = cfg.get('env', {})
+    base_url = (env.get('ANTHROPIC_BASE_URL') or env.get('GOOGLE_GEMINI_BASE_URL') or
+               cfg.get('base_url') or '').rstrip('/')
+    pid_file = os.path.expanduser('~/claude_proxy.pid')
+    if app_type == 'claude' and os.path.exists(pid_file):
+        base_url = 'http://127.0.0.1:18721'
+    codex_pid = os.path.expanduser('~/codex_proxy.pid')
+    if app_type == 'codex' and os.path.exists(codex_pid):
+        base_url = 'http://127.0.0.1:18722'
+    if not base_url:
+        return
+    print(f'verifying... ', end='', flush=True)
+    start = time.time()
+    try:
+        req = urllib.request.Request(base_url + '/', method='HEAD')
+        req.add_header('User-Agent', 'ccswitch-verify/1.0')
+        urllib.request.urlopen(req, timeout=6)
+        ms = int((time.time()-start)*1000)
+        print(f'\r  {GREEN}v{RESET} reachable {DIM}({ms}ms){RESET}              ')
+    except urllib.error.HTTPError:
+        ms = int((time.time()-start)*1000)
+        print(f'\r  {GREEN}v{RESET} reachable {DIM}({ms}ms){RESET}              ')
+    except Exception as e:
+        ms = int((time.time()-start)*1000)
+        err = str(e)
+        if 'timed out' in err.lower() or 'timeout' in err.lower():
+            print(f'\r  {RED}x{RESET} timeout ({ms}ms)                 ')
+        else:
+            print(f'\r  {RED}x{RESET} unreachable                      ')
+
 
 def _read_choice(prompt):
     """优先用命令行传入的编号，否则从终端读取"""
@@ -40,6 +198,7 @@ db_path      = sys.argv[1]
 cc_settings_path = sys.argv[2]
 app_arg      = sys.argv[3].strip().lower() if sys.argv[3] else ''
 provider_num = sys.argv[4].strip() if len(sys.argv) > 4 and sys.argv[4] else ''
+test_mode    = sys.argv[5].strip() == '1' if len(sys.argv) > 5 and sys.argv[5] else False
 
 import sqlite3
 conn = sqlite3.connect(db_path)
@@ -75,6 +234,12 @@ else:
     except (ValueError, AssertionError, EOFError, KeyboardInterrupt):
         print("\n已取消。")
         sys.exit(0)
+
+# --test 模式：检测连通性后退出
+if test_mode:
+    run_test_mode(app_arg, db_path, cc_settings_path)
+    conn.close()
+    sys.exit(0)
 
 # --- 读取 universal_providers 补充备注 ---
 row = conn.execute("SELECT value FROM settings WHERE key='universal_providers'").fetchone()
@@ -832,7 +997,8 @@ if CURRENT_KEY and apply_ok:
         pass
 
 if apply_ok:
-    print(f"\n已切换 {SUPPORTED.get(app_type,'')} 套餐 → {sel['label']}")
+    print(f"\n已切换 {SUPPORTED.get(app_type,'')} 套餐 -> {sel['label']}")
+    verify_after_switch(app_type, cfg)
 else:
     print(f"\n切换失败，保留原套餐配置。")
 conn.close()
