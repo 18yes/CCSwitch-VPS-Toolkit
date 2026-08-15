@@ -282,36 +282,99 @@ if not rows:
     sys.exit(1)
 
 print(f"\n{SUPPORTED.get(app_type, app_type)} 套餐列表:\n")
-providers = []
+
+# --- 收集行数据并打印占位符版本 ---
+import threading as _th, urllib.request as _ureq, urllib.error as _uerr, time as _time
+
+_line_data = []  # (label, route_tag, right, marker, base_url, pid, name, cfg_raw)
 for pid, name, cfg_raw, db_notes in rows:
     pid_short = pid.replace(f'universal-{app_type}-', '')
     u = universal.get(pid_short, {})
-    notes = u.get('notes', '') or db_notes  # 优先 universal_providers，其次 providers.notes 列
+    notes = u.get('notes', '') or db_notes
     label = notes if notes else name
-    # 检测是否需要路由代理（Hermes 本身是 Gateway，不显示路由标签）
     needs_route = False
+    _cfg_tmp = {}
     if app_type != 'hermes':
         try:
-            cfg = json.loads(cfg_raw) if cfg_raw else {}
-            env = cfg.get('env', {})
-            model_chk = (env.get('ANTHROPIC_MODEL', '') or
-                         env.get('ANTHROPIC_DEFAULT_SONNET_MODEL', '') or
-                         cfg.get('model', '')).split('[')[0]
-            if model_chk:
-                needs_route = not any(model_chk.startswith(p) for p in
+            _cfg_tmp = json.loads(cfg_raw) if cfg_raw else {}
+            _et2 = _cfg_tmp.get('env', {})
+            _mc = (_et2.get('ANTHROPIC_MODEL', '') or
+                   _et2.get('ANTHROPIC_DEFAULT_SONNET_MODEL', '') or
+                   _cfg_tmp.get('model', '')).split('[')[0]
+            if _mc:
+                needs_route = not any(_mc.startswith(p) for p in
                                       ('claude-', 'deepseek-', 'gemini-', 'gpt-image'))
             else:
-                import re as _re2
-                config_str = cfg.get('config', '')
-                m = _re2.search(r'^wire_api\s*=\s*"([^"]*)"', config_str, _re2.MULTILINE)
-                needs_route = bool(m and m.group(1) == 'responses')
+                _cs = _cfg_tmp.get('config', '')
+                _rm = re.search(r'^wire_api\s*=\s*"([^"]*)"', _cs, re.MULTILINE)
+                needs_route = bool(_rm and _rm.group(1) == 'responses')
         except Exception:
             pass
     route_tag = ' [路由]' if needs_route else ''
-    marker = ' ← 当前' if pid == current_id else ''
+    marker = ' \u2190 \u5f53\u524d' if pid == current_id else ''
     right = name if label != name else ''
-    print(f"  [{len(providers)+1}] {label + route_tag:<36} {right}{marker}")
-    providers.append({'id': pid, 'name': name, 'cfg_raw': cfg_raw, 'label': label})
+    _base_url = ''
+    try:
+        if not _cfg_tmp:
+            _cfg_tmp = json.loads(cfg_raw) if cfg_raw else {}
+        _et3 = _cfg_tmp.get('env', {})
+        _base_url = (_et3.get('ANTHROPIC_BASE_URL') or _et3.get('GOOGLE_GEMINI_BASE_URL') or
+                     _cfg_tmp.get('base_url') or _cfg_tmp.get('baseUrl') or '')
+        if not _base_url:
+            _bm = re.search(r'^base_url\s*=\s*"([^"]*)"', _cfg_tmp.get('config', ''), re.MULTILINE)
+            _base_url = _bm.group(1) if _bm else ''
+        _base_url = _base_url.rstrip('/')
+    except Exception:
+        pass
+    _line_data.append((label, route_tag, right, marker, _base_url, pid, name, cfg_raw))
+    _n = len(_line_data)
+    print(f"  [{_n}] {label + route_tag:<36} {DIM}[ ... ]{RESET}  {right}{marker}")
+
+providers = [{'id': ld[5], 'name': ld[6], 'cfg_raw': ld[7], 'label': ld[0]} for ld in _line_data]
+_N = len(_line_data)
+_lock = _th.Lock()
+
+def _check_url(url, timeout=5):
+    if not url: return 'skip', 0
+    _s = _time.time()
+    try:
+        _req = _ureq.Request(url + '/', method='HEAD')
+        _req.add_header('User-Agent', 'ccswitch/1.0')
+        _ureq.urlopen(_req, timeout=timeout)
+        return 'ok', int((_time.time()-_s)*1000)
+    except _uerr.HTTPError:
+        return 'ok', int((_time.time()-_s)*1000)
+    except Exception as _xe:
+        _ms = int((_time.time()-_s)*1000)
+        _es = str(_xe).lower()
+        return ('timeout' if 'timed out' in _es or 'timeout' in _es else 'error'), _ms
+
+def _redraw_line(i, status, ms):
+    label, route_tag, right, marker = _line_data[i][:4]
+    num = i + 1
+    if status == 'ok':
+        _vis = f'v {ms}ms'; _colored = f'{GREEN}v{RESET} {DIM}{ms}ms{RESET}'
+    elif status == 'timeout':
+        _vis = 'x timeout'; _colored = f'{RED}x{RESET} {YELLOW}timeout{RESET}'
+    elif status == 'skip':
+        _vis = '-'; _colored = f'{DIM}-{RESET}'
+    else:
+        _vis = 'x error'; _colored = f'{RED}x{RESET} {DIM}error{RESET}'
+    _lat = _colored + ' ' * max(0, 10 - len(_vis))
+    _up = _N - i
+    with _lock:
+        sys.stdout.write(f'\033[{_up}A\r\033[2K')
+        sys.stdout.write(f'  [{num}] {label + route_tag:<36} {_lat}  {right}{marker}')
+        sys.stdout.write(f'\033[{_up}B\r')
+        sys.stdout.flush()
+
+def _run_check(i):
+    st, ms = _check_url(_line_data[i][4])
+    _redraw_line(i, st, ms)
+
+_threads = [_th.Thread(target=_run_check, args=(i,), daemon=True) for i in range(_N)]
+for _t in _threads: _t.start()
+for _t in _threads: _t.join(timeout=6)
 
 print()
 try:
