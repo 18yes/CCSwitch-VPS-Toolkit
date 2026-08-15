@@ -317,7 +317,7 @@ _line_data = []  # (label, route_tag, right, marker, base_url, pid, name, cfg_ra
 for pid, name, cfg_raw, db_notes in rows:
     pid_short = pid.replace(f'universal-{app_type}-', '')
     u = universal.get(pid_short, {})
-    notes = u.get('notes', '') or db_notes
+    notes = db_notes or u.get('notes', '')  # providers.notes 优先（app 专属），fallback 到 universal
     label = notes if notes else name
     needs_route = False
     _cfg_tmp = {}
@@ -328,10 +328,17 @@ for pid, name, cfg_raw, db_notes in rows:
             _mc = (_et2.get('ANTHROPIC_MODEL', '') or
                    _et2.get('ANTHROPIC_DEFAULT_SONNET_MODEL', '') or
                    _cfg_tmp.get('model', '')).split('[')[0]
+            if not _mc:
+                _cs = _cfg_tmp.get('config', '')
+                _mtoml = re.search(r'^model\s*=\s*"([^"]*)"', _cs, re.MULTILINE)
+                _mc = _mtoml.group(1) if _mtoml else ''
             if _mc:
-                needs_route = not any(_mc.startswith(p) for p in
-                                      ('claude-', 'deepseek-', 'gemini-', 'gpt-image'))
-            else:
+                if app_type == 'codex':
+                    needs_route = _mc.startswith('claude-')
+                else:
+                    needs_route = not any(_mc.startswith(p) for p in
+                                         ('claude-', 'deepseek-', 'gemini-', 'gpt-image'))
+            elif app_type != 'codex':
                 _cs = _cfg_tmp.get('config', '')
                 _rm = re.search(r'^wire_api\s*=\s*"([^"]*)"', _cs, re.MULTILINE)
                 needs_route = bool(_rm and _rm.group(1) == 'responses')
