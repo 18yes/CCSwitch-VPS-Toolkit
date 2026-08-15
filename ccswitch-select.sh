@@ -128,7 +128,8 @@ def run_test_mode(app_type_filter, db_path, cc_settings_path):
             else:
                 s2 = f'{RED}x{RESET} {DIM}error{RESET}'
             _right2 = name2 if label2 != name2 else ''
-            print(f'  [{i2+1}] ' + _vljust(label2, 36) + ' ' + _lat_str(st2, ms2)[0] + '  ' + _right2 + marker2)
+            _notes3 = (label2 if label2 != name2 else '')
+            print(f'  [{i2+1}] ' + _vljust(name2, 16) + '  ' + _vljust(_notes3, 33) + '  ' + _lat_str(st2, ms2)[0] + '  ' + marker2)
         print('-' * 58)
         fc2 = len(rows2) - ok_count2
         print(f'  {GREEN}{ok_count2} ok{RESET}   {RED if fc2 else DIM}{fc2} fail{RESET}')
@@ -354,7 +355,8 @@ for pid, name, cfg_raw, db_notes in rows:
         pass
     _line_data.append((label, route_tag, right, marker, _base_url, pid, name, cfg_raw))
     _n = len(_line_data)
-    print(f"  [{_n}] " + _vljust(label + route_tag, 36) + f" {DIM}[ ... ]{RESET}  {right}{marker}")
+    _notes_col = (label if label != name else '') + route_tag
+    print(f"  [{_n}] " + _vljust(name, 16) + "  " + _vljust(_notes_col, 33) + f"  {DIM}[ ... ]{RESET}  {marker}")
 
 providers = [{'id': ld[5], 'name': ld[6], 'cfg_raw': ld[7], 'label': ld[0]} for ld in _line_data]
 _N = len(_line_data)
@@ -382,7 +384,8 @@ def _redraw_line(i, status, ms):
     _up = _N - i
     with _lock:
         sys.stdout.write(f'\033[{_up}A\r\033[2K')
-        sys.stdout.write(f'  [{num}] ' + _vljust(label + route_tag, 36) + ' ' + _col + '  ' + right + marker)
+        _notes2 = (_line_data[i][0] if _line_data[i][0] != _line_data[i][6] else '') + _line_data[i][1]
+        sys.stdout.write(f'  [{num}] ' + _vljust(_line_data[i][6], 16) + '  ' + _vljust(_notes2, 33) + '  ' + _col + '  ' + marker)
         sys.stdout.write(f'\033[{_up}B\r')
         sys.stdout.flush()
 
