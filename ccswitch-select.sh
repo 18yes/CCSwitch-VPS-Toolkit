@@ -227,7 +227,11 @@ else:
         print(f"  [{i+1}] {v:<20} ({counts.get(k,0)} 个套餐)")
     print()
     try:
-        choice = _read_choice("输入编号: ")
+        choice = _read_choice("输入编号 (或 t 检测连通性): ").strip().lower()
+        if choice in ("t", "test"):
+            run_test_mode("", db_path, cc_settings_path)
+            conn.close()
+            sys.exit(0)
         idx = int(choice) - 1
         assert 0 <= idx < len(apps)
         app_type = apps[idx][0]
