@@ -127,11 +127,37 @@ def run_test_mode(app_type_filter, db_path, cc_settings_path):
                 s2 = f'{DIM}- no url{RESET}'
             else:
                 s2 = f'{RED}x{RESET} {DIM}error{RESET}'
-            print(f'  [{i2+1}] {label2:<32} {s2}{marker2}')
+            _right2 = name2 if label2 != name2 else ''
+            print(f'  [{i2+1}] ' + _vljust(label2, 36) + ' ' + _lat_str(st2, ms2)[0] + '  ' + _right2 + marker2)
         print('-' * 58)
         fc2 = len(rows2) - ok_count2
         print(f'  {GREEN}{ok_count2} ok{RESET}   {RED if fc2 else DIM}{fc2} fail{RESET}')
     conn2.close()
+
+def _vlen(s):
+    """Visual width of string (CJK=2, others=1)"""
+    import unicodedata as _ud
+    return sum(2 if _ud.east_asian_width(c) in ('W','F') else 1 for c in s)
+
+def _vljust(s, w):
+    """Left-justify to visual width w"""
+    return s + ' ' * max(0, w - _vlen(s))
+
+def _lat_str(status, ms):
+    """Return (colored, visual_len) for latency field, always 9 vis chars"""
+    if status == 'ok':
+        vis = f'v {ms:>4}ms'  # 8 chars
+        col = f'{GREEN}v{RESET} {DIM}{ms:>4}ms{RESET}'
+    elif status == 'timeout':
+        vis = 'x timeout'  # 9 chars
+        col = f'{RED}x{RESET} {YELLOW}timeout{RESET}'
+    elif status == 'skip':
+        vis = '-        '  # 9 chars
+        col = DIM + '-' + RESET + '        '
+    else:
+        vis = 'x error  '  # 9 chars
+        col = f'{RED}x{RESET} {DIM}error{RESET}  '
+    return col, len(vis)
 
 def verify_after_switch(app_type, cfg):
     import urllib.request, urllib.error, time
@@ -328,7 +354,7 @@ for pid, name, cfg_raw, db_notes in rows:
         pass
     _line_data.append((label, route_tag, right, marker, _base_url, pid, name, cfg_raw))
     _n = len(_line_data)
-    print(f"  [{_n}] {label + route_tag:<36} {DIM}[ ... ]{RESET}  {right}{marker}")
+    print(f"  [{_n}] " + _vljust(label + route_tag, 36) + f" {DIM}[ ... ]{RESET}  {right}{marker}")
 
 providers = [{'id': ld[5], 'name': ld[6], 'cfg_raw': ld[7], 'label': ld[0]} for ld in _line_data]
 _N = len(_line_data)
@@ -352,19 +378,11 @@ def _check_url(url, timeout=5):
 def _redraw_line(i, status, ms):
     label, route_tag, right, marker = _line_data[i][:4]
     num = i + 1
-    if status == 'ok':
-        _vis = f'v {ms}ms'; _colored = f'{GREEN}v{RESET} {DIM}{ms}ms{RESET}'
-    elif status == 'timeout':
-        _vis = 'x timeout'; _colored = f'{RED}x{RESET} {YELLOW}timeout{RESET}'
-    elif status == 'skip':
-        _vis = '-'; _colored = f'{DIM}-{RESET}'
-    else:
-        _vis = 'x error'; _colored = f'{RED}x{RESET} {DIM}error{RESET}'
-    _lat = _colored + ' ' * max(0, 10 - len(_vis))
+    _col, _vl = _lat_str(status, ms)
     _up = _N - i
     with _lock:
         sys.stdout.write(f'\033[{_up}A\r\033[2K')
-        sys.stdout.write(f'  [{num}] {label + route_tag:<36} {_lat}  {right}{marker}')
+        sys.stdout.write(f'  [{num}] ' + _vljust(label + route_tag, 36) + ' ' + _col + '  ' + right + marker)
         sys.stdout.write(f'\033[{_up}B\r')
         sys.stdout.flush()
 
