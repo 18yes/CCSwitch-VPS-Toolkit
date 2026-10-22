@@ -78,19 +78,19 @@ do_sync() {
   # 部署 OpenAI Chat -> Anthropic Messages 格式转换代理
   if [[ -f "$PROXY_SCRIPT" ]]; then
     rsync -az -e "ssh $SSH_OPTS" "$PROXY_SCRIPT" "$VPS:~/claude_proxy.py"
-    ssh $SSH_OPTS "$VPS" "chmod 700 ~/claude_proxy.py"
+    ssh $SSH_OPTS "$VPS" "chmod 700 ~/.cc-switch/claude_proxy.py"
   fi
 
   # 部署 Codex Responses 代理
   if [[ -f "$CODEX_PROXY_SCRIPT" ]]; then
     rsync -az -e "ssh $SSH_OPTS" "$CODEX_PROXY_SCRIPT" "$VPS:~/codex_proxy.py"
-    ssh $SSH_OPTS "$VPS" "chmod 700 ~/codex_proxy.py"
+    ssh $SSH_OPTS "$VPS" "chmod 700 ~/.cc-switch/codex_proxy.py"
   fi
 
   # 部署 Hermes Anthropic Bearer 认证桥（仅回环监听，不转换协议）
   if [[ -f "$HERMES_AUTH_PROXY_SCRIPT" ]]; then
     rsync -az -e "ssh $SSH_OPTS" "$HERMES_AUTH_PROXY_SCRIPT" "$VPS:~/hermes_auth_proxy.py"
-    ssh $SSH_OPTS "$VPS" "chmod 700 ~/hermes_auth_proxy.py"
+    ssh $SSH_OPTS "$VPS" "chmod 700 ~/.cc-switch/hermes_auth_proxy.py"
   fi
 
   # 部署连通性测试工具

@@ -180,10 +180,10 @@ def verify_after_switch(app_type, cfg):
     env = cfg.get('env', {})
     base_url = (env.get('ANTHROPIC_BASE_URL') or env.get('GOOGLE_GEMINI_BASE_URL') or
                cfg.get('base_url') or '').rstrip('/')
-    pid_file = os.path.expanduser('~/claude_proxy.pid')
+    pid_file = os.path.expanduser('~/.cc-switch/claude_proxy.pid')
     if app_type == 'claude' and os.path.exists(pid_file):
         base_url = 'http://127.0.0.1:18721'
-    codex_pid = os.path.expanduser('~/codex_proxy.pid')
+    codex_pid = os.path.expanduser('~/.cc-switch/codex_proxy.pid')
     if app_type == 'codex' and os.path.exists(codex_pid):
         base_url = 'http://127.0.0.1:18722'
     if not base_url:
@@ -438,9 +438,9 @@ def needs_proxy(env):
 def start_claude_proxy(env, model):
     """写 proxy_config.json 并重启 claude_proxy.py"""
     import subprocess
-    proxy_cfg = os.path.expanduser('~/proxy_config.json')
-    proxy_py  = os.path.expanduser('~/claude_proxy.py')
-    pid_file  = os.path.expanduser('~/claude_proxy.pid')
+    proxy_cfg = os.path.expanduser('~/.cc-switch/proxy_config.json')
+    proxy_py  = os.path.expanduser('~/.cc-switch/claude_proxy.py')
+    pid_file  = os.path.expanduser('~/.cc-switch/claude_proxy.pid')
 
     # 停掉旧实例
     if os.path.exists(pid_file):
@@ -454,7 +454,7 @@ def start_claude_proxy(env, model):
         except Exception: pass
 
     if not os.path.exists(proxy_py):
-        print("  ⚠ 未找到 ~/claude_proxy.py，Grok/GptPlus 类套餐无法使用")
+        print("  ⚠ 未找到 ~/.cc-switch/claude_proxy.py，Grok/GptPlus 类套餐无法使用")
         return False
 
     cfg_data = {
@@ -479,15 +479,15 @@ def start_claude_proxy(env, model):
         print(f"  代理已启动 (PID {pid}) → 上游 {cfg_data['upstream_base_url']}")
         return True
     else:
-        print("  ⚠ 代理启动失败，查看 ~/claude_proxy.log")
+        print("  ⚠ 代理启动失败，查看 ~/.cc-switch/claude_proxy.log")
         return False
 
 def start_codex_proxy(upstream_url, api_key, model):
     """写 codex_proxy_config.json，重启 codex_proxy.py，等待 /health 就绪"""
     import subprocess, time, urllib.request
-    proxy_cfg = os.path.expanduser('~/codex_proxy_config.json')
-    proxy_py  = os.path.expanduser('~/codex_proxy.py')
-    pid_file  = os.path.expanduser('~/codex_proxy.pid')
+    proxy_cfg = os.path.expanduser('~/.cc-switch/codex_proxy_config.json')
+    proxy_py  = os.path.expanduser('~/.cc-switch/codex_proxy.py')
+    pid_file  = os.path.expanduser('~/.cc-switch/codex_proxy.pid')
 
     # 停掉旧实例
     if os.path.exists(pid_file):
@@ -501,7 +501,7 @@ def start_codex_proxy(upstream_url, api_key, model):
         except Exception: pass
 
     if not os.path.exists(proxy_py):
-        print("  ⚠ 未找到 ~/codex_proxy.py，Codex 代理无法启动")
+        print("  ⚠ 未找到 ~/.cc-switch/codex_proxy.py，Codex 代理无法启动")
         return False
 
     cfg_data = {
@@ -531,12 +531,12 @@ def start_codex_proxy(upstream_url, api_key, model):
                     return True
         except Exception:
             pass
-    print("  ⚠ Codex 代理启动失败，查看 ~/codex_proxy.log")
+    print("  ⚠ Codex 代理启动失败，查看 ~/.cc-switch/codex_proxy.log")
     return False
 
 def stop_codex_proxy():
     """停止 Codex 专用代理"""
-    pid_file = os.path.expanduser('~/codex_proxy.pid')
+    pid_file = os.path.expanduser('~/.cc-switch/codex_proxy.pid')
     if os.path.exists(pid_file):
         try:
             pid = int(open(pid_file).read().strip())
@@ -577,7 +577,7 @@ def apply_claude(cfg):
     else:
         # 直接 Anthropic Messages 格式
         # 停掉代理（避免占用端口干扰）
-        pid_file = os.path.expanduser('~/claude_proxy.pid')
+        pid_file = os.path.expanduser('~/.cc-switch/claude_proxy.pid')
         if os.path.exists(pid_file):
             try:
                 pid = int(open(pid_file).read().strip())
@@ -794,7 +794,7 @@ def apply_hermes(cfg):
         print("  ⚠ 找不到 hermes 命令，无法校验或重启 Gateway")
         return False
 
-    proxy_script = os.path.expanduser('~/hermes_auth_proxy.py')
+    proxy_script = os.path.expanduser('~/.cc-switch/hermes_auth_proxy.py')
     proxy_port = int(os.environ.get('CCSWITCH_HERMES_PROXY_PORT', '18723'))
     proxy_cfg_path = os.path.join(hermes_dir, 'ccswitch-auth-proxy.json')
     proxy_pid_path = os.path.join(hermes_dir, 'ccswitch-auth-proxy.pid')

@@ -8,9 +8,9 @@ Usage:
     python3 claude_proxy.py              # foreground
     python3 claude_proxy.py --daemon     # background daemon
 
-Config: ~/proxy_config.json
-Logs:   ~/claude_proxy.log
-PID:    ~/claude_proxy.pid
+Config: ~/.cc-switch/proxy_config.json
+Logs:   ~/.cc-switch/claude_proxy.log
+PID:    ~/.cc-switch/claude_proxy.pid
 """
 
 import http.server
@@ -27,9 +27,9 @@ from socketserver import ThreadingMixIn
 
 # ===================== Paths =====================
 
-CONFIG_PATH = os.path.expanduser("~/proxy_config.json")
-PID_FILE = os.path.expanduser("~/claude_proxy.pid")
-LOG_FILE = os.path.expanduser("~/claude_proxy.log")
+CONFIG_PATH = os.path.expanduser("~/.cc-switch/proxy_config.json")
+PID_FILE = os.path.expanduser("~/.cc-switch/claude_proxy.pid")
+LOG_FILE = os.path.expanduser("~/.cc-switch/claude_proxy.log")
 
 _config = {}
 

@@ -9,9 +9,9 @@ Usage:
     python3 codex_proxy.py              # foreground
     python3 codex_proxy.py --daemon     # background daemon
 
-Config: ~/codex_proxy_config.json
-Logs:   ~/codex_proxy.log
-PID:    ~/codex_proxy.pid
+Config: ~/.cc-switch/codex_proxy_config.json
+Logs:   ~/.cc-switch/codex_proxy.log
+PID:    ~/.cc-switch/codex_proxy.pid
 """
 
 import http.server
@@ -27,9 +27,9 @@ from socketserver import ThreadingMixIn
 
 # ===================== Paths =====================
 
-CONFIG_PATH = os.path.expanduser("~/codex_proxy_config.json")
-PID_FILE    = os.path.expanduser("~/codex_proxy.pid")
-LOG_FILE    = os.path.expanduser("~/codex_proxy.log")
+CONFIG_PATH = os.path.expanduser("~/.cc-switch/codex_proxy_config.json")
+PID_FILE    = os.path.expanduser("~/.cc-switch/codex_proxy.pid")
+LOG_FILE    = os.path.expanduser("~/.cc-switch/codex_proxy.log")
 
 _config = {}
 
